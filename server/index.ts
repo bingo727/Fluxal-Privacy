@@ -6,6 +6,52 @@ import { createServer } from "http";
 const app = express();
 const httpServer = createServer(app);
 
+// CORS configuration - Allow frontend to access API
+app.use((req, res, next) => {
+  const allowedOrigins = [
+    'http://localhost:5001',
+  ];
+  
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
+
+// Remove restrictive headers and allow Privy/wallet extensions
+app.use((req, res, next) => {
+  // Remove cross-origin isolation that blocks wallet extensions
+  res.removeHeader('Cross-Origin-Opener-Policy');
+  res.removeHeader('Cross-Origin-Embedder-Policy');
+  res.removeHeader('Cross-Origin-Resource-Policy');
+  
+  // Set permissive CSP for wallet authentication
+  res.setHeader(
+    'Content-Security-Policy',
+    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+    "script-src * 'unsafe-inline' 'unsafe-eval'; " +
+    "style-src * 'unsafe-inline'; " +
+    "img-src * data: blob:; " +
+    "font-src * data:; " +
+    "frame-src *; " +
+    "child-src * blob:; " +
+    "connect-src * wss: ws:; " +
+    "worker-src * blob:;"
+  );
+  next();
+});
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
