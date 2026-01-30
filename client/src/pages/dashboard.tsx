@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
-import { Home, WifiOff, Activity, MessageSquare, Eye, EyeOff, Bug, Send, Download, FolderOpen, File, CheckCircle2, AlertTriangle, ShieldCheck, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { Home, WifiOff, Activity, MessageSquare, Eye, EyeOff, Bug, Send, Download, FolderOpen, File, CheckCircle2, AlertTriangle, ShieldCheck, ChevronLeft, ChevronRight, Search, Shield, Key, Copy, RefreshCw, Lock, Zap, Layers, Loader2, QrCode, ExternalLink, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import fluxalTitle from "@assets/Untitled_design__62_-removebg-preview_1765006354328.png";
@@ -19,14 +19,35 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useToast } from "@/hooks/use-toast";
 
 // Mock data for initial state or fallback
 const INITIAL_SOL_PRICE = 132.67;
+
+// Stealth Transfer interfaces
+interface StealthMetaAddress {
+  spendingPublicKey: string;
+  viewingPublicKey: string;
+  address: string;
+}
+
+interface ContractDeposit {
+  commitment: string;
+  ephemeralPublicKey: string;
+  amount: number;
+  timestamp: number;
+  depositIndex: number;
+  claimed: boolean;
+  nonce?: string;
+}
 
 export default function Dashboard() {
   const [_, setLocation] = useLocation();
   const { user, authenticated, logout } = usePrivy();
   const { wallets } = useWallets();
+  const { toast } = useToast();
   const [balance, setBalance] = useState<number>(0);
   const [solPrice, setSolPrice] = useState<number>(INITIAL_SOL_PRICE);
   const [solChange, setSolChange] = useState<number>(-0.97);
@@ -36,6 +57,31 @@ export default function Dashboard() {
   const activeWallet = wallets[0];
   const address = activeWallet?.address || user?.wallet?.address || "";
   const shortAddress = address ? `${address.slice(0, 4)}...${address.slice(-4)}` : "Not Connected";
+  
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+  
+  // Stealth Transfer State
+  const [metaAddress, setMetaAddress] = useState<StealthMetaAddress | null>(null);
+  const [isGeneratingMeta, setIsGeneratingMeta] = useState(false);
+  const [isLoadingMeta, setIsLoadingMeta] = useState(false);
+  
+  // Send state
+  const [recipientMetaAddress, setRecipientMetaAddress] = useState("");
+  const [sendAmount, setSendAmount] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [contractDepositResult, setContractDepositResult] = useState<any>(null);
+  
+  // Receive state
+  const [contractDeposits, setContractDeposits] = useState<ContractDeposit[]>([]);
+  const [isScanningContract, setIsScanningContract] = useState(false);
+  const [isClaimingContract, setIsClaimingContract] = useState<string | null>(null);
+  
+  // UI state
+  const [copied, setCopied] = useState(false);
+  const [showFull, setShowFull] = useState(false);
+  const [stealthTab, setStealthTab] = useState("generate");
+  const [needsRegeneration, setNeedsRegeneration] = useState(false);
+  const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
 
   useEffect(() => {
     if (!authenticated) {
@@ -43,6 +89,12 @@ export default function Dashboard() {
         // setLocation("/connect"); 
     }
   }, [authenticated, setLocation]);
+  
+  useEffect(() => {
+    if (authenticated && user) {
+      loadMetaAddress();
+    }
+  }, [authenticated, user]);
 
   useEffect(() => {
     const fetchPrice = async () => {
@@ -83,6 +135,500 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [address]);
 
+  // ==================== META-ADDRESS FUNCTIONS ====================
+  
+  const loadMetaAddress = async () => {
+    if (!user) return;
+    
+    setIsLoadingMeta(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/stealth/meta-address/${user.id}`);
+      const data = await response.json();
+      
+      if (data.success && data.metaAddress) {
+        setMetaAddress(data.metaAddress);
+      }
+    } catch (error) {
+      console.error('Failed to load meta-address:', error);
+    } finally {
+      setIsLoadingMeta(false);
+    }
+  };
+  
+  const generateMetaAddress = async () => {
+    if (!user) {
+      toast({
+        title: "Authentication Required",
+        description: "Please connect your wallet first",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    if (metaAddress && !needsRegeneration) {
+      setShowRegenerateConfirm(true);
+      return;
+    }
+    
+    performGeneration();
+  };
+  
+  const performGeneration = async () => {
+    setShowRegenerateConfirm(false);
+    
+    setIsGeneratingMeta(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/privacy-contract/generate-meta-address`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setMetaAddress(data.metaAddress);
+        
+        if (user) {
+          await fetch(`${API_BASE_URL}/api/stealth/store-meta-address`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: user.id,
+              metaAddress: data.metaAddress,
+              privateKeys: data.privateKeys
+            })
+          });
+        }
+        
+        setNeedsRegeneration(false);
+        toast({
+          title: "Meta-Address Generated!",
+          description: metaAddress ? "New meta-address created. Share this with senders." : "You can now receive private payments",
+        });
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error: any) {
+      toast({
+        title: "Generation Failed",
+        description: error.message || "Failed to generate meta-address",
+        variant: "destructive"
+      });
+    } finally {
+      setIsGeneratingMeta(false);
+    }
+  };
+  
+  // ==================== SEND FUNCTIONS ====================
+  
+  const handleSend = async () => {
+    if (!user || !user.wallet?.address) {
+      toast({
+        title: "Wallet Required",
+        description: "Please connect your wallet first",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    if (!recipientMetaAddress || !sendAmount) {
+      toast({
+        title: "Missing Information",
+        description: "Please provide recipient address and amount",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    let parsedMetaAddress: StealthMetaAddress;
+    try {
+      parsedMetaAddress = JSON.parse(recipientMetaAddress);
+    } catch {
+      toast({
+        title: "Invalid Format",
+        description: "Please paste a valid stealth meta-address JSON",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setIsSending(true);
+    setContractDepositResult(null);
+    
+    try {
+      const provider = (window as any).solana;
+      if (!provider || !provider.isConnected) {
+        throw new Error('Solana wallet not connected. Please connect Phantom or another Solana wallet.');
+      }
+      
+      const { Connection, PublicKey, Transaction, LAMPORTS_PER_SOL } = await import('@solana/web3.js');
+      const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      const connection = new Connection(RPC_URL);
+      
+      const senderPubkey = new PublicKey(user.wallet.address);
+      const balance = await connection.getBalance(senderPubkey);
+      const balanceSOL = balance / LAMPORTS_PER_SOL;
+      const requiredSOL = parseFloat(sendAmount) + 0.002;
+      
+      if (balanceSOL < requiredSOL) {
+        const network = RPC_URL.includes('devnet') ? 'devnet' : 'mainnet';
+        const faucetMessage = network === 'devnet' 
+          ? `Get devnet SOL from: https://faucet.solana.com` 
+          : `Please add SOL to your wallet`;
+        throw new Error(
+          `Insufficient balance. You have ${balanceSOL.toFixed(4)} SOL but need ${requiredSOL.toFixed(4)} SOL. ${faucetMessage}`
+        );
+      }
+      
+      toast({
+        title: "Preparing Transaction",
+        description: "Building smart contract instruction...",
+      });
+      
+      const prepareResponse = await fetch(`${API_BASE_URL}/api/privacy-contract/prepare-transaction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          senderWallet: user.wallet.address,
+          recipientMetaAddress: parsedMetaAddress,
+          amount: parseFloat(sendAmount)
+        })
+      });
+      
+      const contentType = prepareResponse.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error('Server returned non-JSON response. Make sure the backend server is running.');
+      }
+      
+      const prepareData = await prepareResponse.json();
+      if (!prepareData.success) {
+        throw new Error(prepareData.error || 'Failed to prepare transaction');
+      }
+      
+      const { serializedTransaction, commitment, ephemeralPublicKey, nonce } = prepareData;
+      
+      const txBytes = Uint8Array.from(atob(serializedTransaction), c => c.charCodeAt(0));
+      const transaction = Transaction.from(txBytes);
+      
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = new PublicKey(user.wallet.address);
+      transaction.lastValidBlockHeight = lastValidBlockHeight;
+      
+      toast({
+        title: "Approve Transaction",
+        description: "Please approve the smart contract deposit in your wallet",
+      });
+      
+      const signedTx = await provider.signTransaction(transaction);
+      const rawTransaction = signedTx.serialize();
+      const signature = await connection.sendRawTransaction(rawTransaction, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed'
+      });
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      }, 'confirmed');
+      
+      await fetch(`${API_BASE_URL}/api/privacy-contract/record-deposit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          signature,
+          commitment,
+          ephemeralPublicKey,
+          nonce,
+          amount: parseFloat(sendAmount),
+          senderWallet: user.wallet.address,
+          receiverMetaAddress: parsedMetaAddress
+        })
+      });
+      
+      setContractDepositResult({
+        commitment,
+        ephemeralPublicKey,
+        amount: parseFloat(sendAmount),
+        txSignature: signature
+      });
+      
+      setSendAmount("");
+      setRecipientMetaAddress("");
+      
+      toast({
+        title: "Deposit Successful! 🎉",
+        description: "Smart contract deposit confirmed",
+      });
+      
+    } catch (error: any) {
+      console.error('Deposit error:', error);
+      
+      let errorTitle = "Deposit Failed";
+      let errorMessage = error.message || "Failed to deposit to privacy pool";
+      
+      if (error.message?.includes('insufficient lamports')) {
+        errorTitle = "Insufficient Funds";
+        errorMessage = `Your wallet doesn't have enough SOL.`;
+      }
+      
+      toast({
+        title: errorTitle,
+        description: errorMessage,
+        variant: "destructive"
+      });
+    } finally {
+      setIsSending(false);
+    }
+  };
+  
+  // ==================== RECEIVE FUNCTIONS ====================
+  
+  const scanForPayments = async () => {
+    if (!user || !metaAddress) {
+      toast({
+        title: "Meta-Address Required",
+        description: "Please generate a meta-address first",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setIsScanningContract(true);
+    try {
+      const keysResponse = await fetch(`${API_BASE_URL}/api/stealth/get-keys/${user.id}`);
+      const keysData = await keysResponse.json();
+      
+      if (!keysData.success || !keysData.viewingPrivateKey) {
+        setNeedsRegeneration(true);
+        setStealthTab("generate");
+        throw new Error('Viewing key not found. Please regenerate your meta-address.');
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/api/privacy-contract/scan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metaAddress,
+          viewingPrivateKey: keysData.viewingPrivateKey
+        })
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setContractDeposits(data.deposits);
+        toast({
+          title: "Scan Complete",
+          description: `Found ${data.deposits.length} deposit(s) in privacy pool`,
+        });
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error: any) {
+      toast({
+        title: "Scan Failed",
+        description: error.message || "Failed to scan for deposits",
+        variant: "destructive"
+      });
+    } finally {
+      setIsScanningContract(false);
+    }
+  };
+  
+  const claimPayment = async (deposit: ContractDeposit) => {
+    if (!user || !user.wallet?.address) {
+      toast({
+        title: "Wallet Required",
+        description: "Please connect your wallet to claim",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setIsClaimingContract(deposit.commitment);
+    
+    try {
+      const { Connection, Transaction, PublicKey, LAMPORTS_PER_SOL } = await import('@solana/web3.js');
+      const RPC_URL = import.meta.env.VITE_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      const connection = new Connection(RPC_URL);
+      
+      const walletPubkey = new PublicKey(user.wallet.address);
+      const balance = await connection.getBalance(walletPubkey);
+      const balanceInSol = balance / LAMPORTS_PER_SOL;
+      
+      const MIN_BALANCE_REQUIRED = 0.002;
+      
+      if (balanceInSol < MIN_BALANCE_REQUIRED) {
+        throw new Error(
+          `Insufficient SOL balance for rent. You need at least ${MIN_BALANCE_REQUIRED} SOL. Current: ${balanceInSol.toFixed(6)} SOL.`
+        );
+      }
+      
+      const initCheckResponse = await fetch(`${API_BASE_URL}/api/privacy-contract/ensure-initialized`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallet: user.wallet.address })
+      });
+      
+      const initCheckData = await initCheckResponse.json();
+      
+      if (initCheckData.needsInitialization) {
+        toast({
+          title: "Initializing Privacy Pool",
+          description: "First-time setup: Please approve the initialization transaction",
+        });
+        
+        const initTxBuffer = Uint8Array.from(atob(initCheckData.serializedTransaction), c => c.charCodeAt(0));
+        const initTransaction = Transaction.from(initTxBuffer);
+        
+        const { blockhash: initBlockhash, lastValidBlockHeight: initLastValidBlockHeight } = await connection.getLatestBlockhash();
+        initTransaction.recentBlockhash = initBlockhash;
+        initTransaction.feePayer = new PublicKey(user.wallet.address);
+        initTransaction.lastValidBlockHeight = initLastValidBlockHeight;
+        
+        const provider = (window as any).solana;
+        if (!provider || !provider.isConnected) {
+          throw new Error('Solana wallet not connected');
+        }
+        
+        const signedInitTx = await provider.signTransaction(initTransaction);
+        const rawInitTransaction = signedInitTx.serialize();
+        const initSignature = await connection.sendRawTransaction(rawInitTransaction, {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed'
+        });
+        
+        await connection.confirmTransaction({
+          signature: initSignature,
+          blockhash: initBlockhash,
+          lastValidBlockHeight: initLastValidBlockHeight
+        }, 'confirmed');
+        
+        toast({
+          title: "Pool Initialized!",
+          description: "Now processing your claim...",
+        });
+      }
+      
+      const keysResponse = await fetch(`${API_BASE_URL}/api/stealth/get-keys/${user.id}`);
+      const keysData = await keysResponse.json();
+      
+      if (!keysData.success || !keysData.spendingPrivateKey) {
+        setNeedsRegeneration(true);
+        setStealthTab("generate");
+        throw new Error('Spending key not found. Please regenerate your meta-address.');
+      }
+      
+      toast({
+        title: "Preparing Claim",
+        description: "Building smart contract transaction...",
+      });
+      
+      const prepareResponse = await fetch(`${API_BASE_URL}/api/privacy-contract/prepare-claim-transaction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiverWallet: user.wallet.address,
+          commitment: deposit.commitment,
+          nonce: deposit.nonce,
+          amount: deposit.amount
+        })
+      });
+      
+      const prepareData = await prepareResponse.json();
+      
+      if (!prepareData.success) {
+        throw new Error(prepareData.error || 'Failed to prepare claim transaction');
+      }
+      
+      const transactionBuffer = Uint8Array.from(atob(prepareData.serializedTransaction), c => c.charCodeAt(0));
+      const transaction = Transaction.from(transactionBuffer);
+      
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = new PublicKey(user.wallet.address);
+      transaction.lastValidBlockHeight = lastValidBlockHeight;
+      
+      toast({
+        title: "Approve Transaction",
+        description: "Please approve the claim transaction in your wallet",
+      });
+      
+      const provider = (window as any).solana;
+      if (!provider || !provider.isConnected) {
+        throw new Error('Solana wallet not connected');
+      }
+      
+      const signedTx = await provider.signTransaction(transaction);
+      const rawTransaction = signedTx.serialize();
+      
+      const signature = await connection.sendRawTransaction(rawTransaction, {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+        maxRetries: 3
+      });
+      
+      await connection.confirmTransaction({
+        signature,
+        blockhash,
+        lastValidBlockHeight
+      }, 'confirmed');
+      
+      await fetch(`${API_BASE_URL}/api/privacy-contract/record-claim`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          commitment: deposit.commitment,
+          signature,
+          receiverWallet: user.wallet.address
+        })
+      });
+      
+      toast({
+        title: "Claim Successful!",
+        description: "Funds transferred to your wallet from privacy pool",
+      });
+      
+      scanForPayments();
+    } catch (error: any) {
+      console.error('Claim error:', error);
+      
+      let errorMessage = error.message || "Failed to claim from privacy pool";
+      
+      toast({
+        title: "Claim Failed",
+        description: errorMessage,
+        variant: "destructive"
+      });
+    } finally {
+      setIsClaimingContract(null);
+    }
+  };
+  
+  // ==================== UTILITY FUNCTIONS ====================
+  
+  const copyToClipboard = (text: string, label: string = "Address") => {
+    navigator.clipboard.writeText(text);
+    setCopied(true);
+    toast({
+      title: "Copied!",
+      description: `${label} copied to clipboard`,
+    });
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const truncateAddress = (address: string, start = 12, end = 12) => {
+    if (!address) return "";
+    return `${address.slice(0, start)}...${address.slice(-end)}`;
+  };
+  
+  const formatMetaAddressForSharing = () => {
+    if (!metaAddress) return "";
+    return JSON.stringify(metaAddress, null, 2);
+  };
+
   const solValue = balance * solPrice;
   const usdcBalance = 0; // Mock for now
   const usdcValue = usdcBalance * 1; // USDC is stable
@@ -106,6 +652,536 @@ export default function Dashboard() {
 
   const renderContent = () => {
       switch (activeTab) {
+        case "stealth":
+          return (
+            <div className="max-w-6xl mx-auto space-y-6">
+              {/* Header */}
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h1 className="text-2xl font-bold mb-2">Stealth Transfers</h1>
+                  <p className="text-gray-400 text-sm">Private payments using stealth addresses and smart contracts</p>
+                </div>
+                <div className="px-4 py-2 rounded-full border border-[#FFE500]/20 bg-[#FFE500]/10 text-xs text-[#FFE500] font-mono flex items-center gap-2">
+                  <Shield className="w-3 h-3" />
+                  Enhanced Privacy
+                </div>
+              </div>
+
+              {/* Authentication Check */}
+              {!authenticated && (
+                <div className="bg-[#111] border border-white/5 rounded-xl p-6 mb-6">
+                  <div className="text-center">
+                    <Lock className="mx-auto mb-4 text-[#FFE500]" size={48} />
+                    <h3 className="text-xl font-bold mb-2">Wallet Connection Required</h3>
+                    <p className="text-gray-400 mb-4">Please connect your wallet to use stealth transfers</p>
+                    <Button 
+                      onClick={() => setLocation("/connect")}
+                      className="bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                    >
+                      Connect Wallet
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {/* Main Tabs */}
+              <Tabs value={stealthTab} onValueChange={setStealthTab} className="w-full">
+                <TabsList className="grid w-full grid-cols-3 mb-6 bg-[#111] border border-white/5 p-1 rounded-xl">
+                  <TabsTrigger value="generate" className="rounded-lg data-[state=active]:bg-[#FFE500] data-[state=active]:text-black">
+                    <Key size={16} className="mr-2" />
+                    Generate
+                  </TabsTrigger>
+                  <TabsTrigger value="send" className="rounded-lg data-[state=active]:bg-[#FFE500] data-[state=active]:text-black">
+                    <Send size={16} className="mr-2" />
+                    Send
+                  </TabsTrigger>
+                  <TabsTrigger value="receive" className="rounded-lg data-[state=active]:bg-[#FFE500] data-[state=active]:text-black">
+                    <Download size={16} className="mr-2" />
+                    Receive
+                  </TabsTrigger>
+                </TabsList>
+
+                {/* GENERATE TAB */}
+                <TabsContent value="generate" className="space-y-6">
+                  {needsRegeneration && (
+                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 mb-4">
+                      <div className="flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-full bg-yellow-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <RefreshCw size={16} className="text-yellow-500" />
+                        </div>
+                        <div className="flex-1">
+                          <h4 className="font-bold text-yellow-500 mb-1">Regeneration Required</h4>
+                          <p className="text-white/60 text-sm mb-3">
+                            Your private keys are missing. Please regenerate your meta-address.
+                          </p>
+                          <Button
+                            onClick={generateMetaAddress}
+                            disabled={isGeneratingMeta}
+                            className="bg-yellow-500 hover:bg-yellow-600 text-black"
+                            size="sm"
+                          >
+                            {isGeneratingMeta ? (
+                              <>
+                                <Loader2 className="mr-2 animate-spin" size={14} />
+                                Generating...
+                              </>
+                            ) : (
+                              <>
+                                <RefreshCw size={14} className="mr-2" />
+                                Regenerate Now
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="bg-[#111] border border-white/5 rounded-xl">
+                    <div className="p-6 border-b border-white/5">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Key className="text-[#FFE500]" size={24} />
+                        <h3 className="text-xl font-bold">Your Stealth Meta-Address</h3>
+                      </div>
+                      <p className="text-gray-400 text-sm">
+                        Share this address publicly to receive private payments. It never appears on-chain.
+                      </p>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      {isLoadingMeta ? (
+                        <div className="flex items-center justify-center py-8">
+                          <Loader2 className="animate-spin text-[#FFE500]" size={32} />
+                        </div>
+                      ) : metaAddress ? (
+                        <>
+                          <div className="bg-black/50 border border-white/10 rounded-xl p-6 space-y-4">
+                            <div>
+                              <label className="text-xs text-gray-400 uppercase tracking-wider mb-2 block">
+                                Meta-Address ID
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <code className="flex-1 text-[#FFE500] font-mono text-sm truncate overflow-hidden">
+                                  {metaAddress.address}
+                                </code>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => copyToClipboard(metaAddress.address, "Meta-Address ID")}
+                                  className="hover:text-[#FFE500]"
+                                >
+                                  <Copy size={16} />
+                                </Button>
+                              </div>
+                            </div>
+                            
+                            <div>
+                              <label className="text-xs text-gray-400 uppercase tracking-wider mb-2 block">
+                                Spending Public Key
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <code className="flex-1 text-white/70 font-mono text-xs break-all">
+                                  {showFull ? metaAddress.spendingPublicKey : truncateAddress(metaAddress.spendingPublicKey)}
+                                </code>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => copyToClipboard(metaAddress.spendingPublicKey, "Spending Key")}
+                                  className="hover:text-[#FFE500]"
+                                >
+                                  <Copy size={16} />
+                                </Button>
+                              </div>
+                            </div>
+                            
+                            <div>
+                              <label className="text-xs text-gray-400 uppercase tracking-wider mb-2 block">
+                                Viewing Public Key
+                              </label>
+                              <div className="flex items-center gap-2">
+                                <code className="flex-1 text-white/70 font-mono text-xs break-all">
+                                  {showFull ? metaAddress.viewingPublicKey : truncateAddress(metaAddress.viewingPublicKey)}
+                                </code>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => copyToClipboard(metaAddress.viewingPublicKey, "Viewing Key")}
+                                  className="hover:text-[#FFE500]"
+                                >
+                                  <Copy size={16} />
+                                </Button>
+                              </div>
+                            </div>
+                            
+                            <div className="flex gap-2 pt-2">
+                              <Button
+                                size="sm"
+                                onClick={() => setShowFull(!showFull)}
+                                className="flex-1 bg-[#FFE500] hover:bg-[#FFDD00] text-black"
+                              >
+                                {showFull ? <EyeOff size={16} className="mr-2" /> : <Eye size={16} className="mr-2" />}
+                                {showFull ? "Hide" : "Show"} Full Keys
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={() => copyToClipboard(formatMetaAddressForSharing(), "Complete Meta-Address")}
+                                className="flex-1 bg-[#FFE500] hover:bg-[#FFDD00] text-black"
+                              >
+                                <Copy size={16} className="mr-2" />
+                                Copy for Sharing
+                              </Button>
+                            </div>
+                          </div>
+                          
+                          <div className="pt-2 border-t border-white/5">
+                            <Button
+                              onClick={generateMetaAddress}
+                              disabled={isGeneratingMeta}
+                              className="w-full bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                            >
+                              {isGeneratingMeta ? (
+                                <>
+                                  <Loader2 className="mr-2 animate-spin" size={16} />
+                                  Generating...
+                                </>
+                              ) : (
+                                <>
+                                  <RefreshCw size={16} className="mr-2" />
+                                  Regenerate Meta-Address
+                                </>
+                              )}
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="text-center py-8">
+                          <QrCode className="mx-auto mb-4 text-white/30" size={48} />
+                          <p className="text-white/40 mb-4">No meta-address generated yet</p>
+                          <Button
+                            onClick={generateMetaAddress}
+                            disabled={isGeneratingMeta || !authenticated}
+                            className="bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                          >
+                            {isGeneratingMeta ? (
+                              <>
+                                <Loader2 className="mr-2 animate-spin" size={16} />
+                                Generating...
+                              </>
+                            ) : (
+                              <>
+                                <Key size={16} className="mr-2" />
+                                Generate Meta-Address
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  {/* Info Cards */}
+                  <div className="grid md:grid-cols-3 gap-4">
+                    <div className="bg-[#111] border border-white/5 rounded-xl p-6 hover:border-[#FFE500]/20 transition-all">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-12 h-12 rounded-xl bg-[#FFE500]/20 flex items-center justify-center flex-shrink-0">
+                          <Lock size={20} className="text-[#FFE500]" />
+                        </div>
+                        <h4 className="font-bold text-[#FFE500]">Publicly Shareable</h4>
+                      </div>
+                      <p className="text-white/40 text-sm">Your meta-address is safe to share. It never appears on-chain.</p>
+                    </div>
+                    
+                    <div className="bg-[#111] border border-white/5 rounded-xl p-6 hover:border-[#FFE500]/20 transition-all">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-12 h-12 rounded-xl bg-[#FFE500]/20 flex items-center justify-center flex-shrink-0">
+                          <Shield size={20} className="text-[#FFE500]" />
+                        </div>
+                        <h4 className="font-bold text-[#FFE500]">Unlinkable Payments</h4>
+                      </div>
+                      <p className="text-white/40 text-sm">Each payment uses a unique one-time address generated from your meta-address.</p>
+                    </div>
+                    
+                    <div className="bg-[#111] border border-white/5 rounded-xl p-6 hover:border-[#FFE500]/20 transition-all">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-12 h-12 rounded-xl bg-[#FFE500]/20 flex items-center justify-center flex-shrink-0">
+                          <Zap size={20} className="text-[#FFE500]" />
+                        </div>
+                        <h4 className="font-bold text-[#FFE500]">Full Control</h4>
+                      </div>
+                      <p className="text-white/40 text-sm">Only you can detect and claim payments sent to your meta-address.</p>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                {/* SEND TAB */}
+                <TabsContent value="send" className="space-y-6">
+                  <div className="bg-gradient-to-r from-[#FFE500]/20 to-[#FFE500]/10 border border-[#FFE500]/30 rounded-xl p-6">
+                    <div className="flex items-start gap-4">
+                      <div className="w-12 h-12 rounded-full bg-[#FFE500]/30 flex items-center justify-center flex-shrink-0">
+                        <Layers size={24} className="text-[#FFE500]" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl font-bold text-white mb-2">Smart Contract Privacy Pool</h3>
+                        <p className="text-white/60 text-sm mb-3">
+                          Funds are deposited to a privacy pool with ZK commitments, providing complete receiver privacy.
+                        </p>
+                        <div className="flex gap-3 text-xs flex-wrap">
+                          <span className="px-3 py-1 rounded-full bg-[#FFE500]/20 text-[#FFE500]">✓ ZK Commitments</span>
+                          <span className="px-3 py-1 rounded-full bg-[#FFE500]/20 text-[#FFE500]">✓ Nullifier Protection</span>
+                          <span className="px-3 py-1 rounded-full bg-[#FFE500]/20 text-[#FFE500]">✓ Anonymity Set</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="bg-[#111] border border-white/5 rounded-xl">
+                    <div className="p-6 border-b border-white/5">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Send className="text-[#FFE500]" size={24} />
+                        <h3 className="text-xl font-bold">Deposit to Privacy Pool</h3>
+                      </div>
+                      <p className="text-gray-400 text-sm">
+                        Send SOL to the smart contract with receiver's meta-address
+                      </p>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      <div>
+                        <label className="text-sm font-medium mb-2 block text-white/40">
+                          Recipient's Meta-Address (JSON)
+                        </label>
+                        <textarea
+                          value={recipientMetaAddress}
+                          onChange={(e) => setRecipientMetaAddress(e.target.value)}
+                          placeholder='{"spendingPublicKey":"...","viewingPublicKey":"...","address":"..."}'
+                          className="w-full h-32 bg-black/50 border border-white/10 rounded-xl p-4 font-mono text-sm text-white/70 resize-none focus:border-[#FFE500]/50 focus:outline-none"
+                          disabled={!authenticated}
+                        />
+                      </div>
+                      
+                      <div>
+                        <label className="text-sm font-medium mb-2 block text-white/40">
+                          Amount (SOL)
+                        </label>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          value={sendAmount}
+                          onChange={(e) => setSendAmount(e.target.value)}
+                          placeholder="0.00"
+                          className="bg-black/50 border-white/10 text-white focus:border-[#FFE500]/50"
+                          disabled={!authenticated}
+                        />
+                      </div>
+                      
+                      <Button
+                        onClick={handleSend}
+                        disabled={isSending || !authenticated || !recipientMetaAddress || !sendAmount}
+                        className="w-full bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                        size="lg"
+                      >
+                        {isSending ? (
+                          <>
+                            <Loader2 className="mr-2 animate-spin" size={18} />
+                            Depositing...
+                          </>
+                        ) : (
+                          <>
+                            <Layers size={18} className="mr-2" />
+                            Deposit to Privacy Contract
+                          </>
+                        )}
+                      </Button>
+                      
+                      {contractDepositResult && (
+                        <div className="bg-green-500/10 border border-green-500/30 rounded-xl p-4 space-y-2">
+                          <div className="flex items-center gap-2 text-green-400 font-medium">
+                            <Check size={18} />
+                            Deposit Successful!
+                          </div>
+                          <div className="text-sm text-white/60 space-y-1">
+                            <p>Commitment: <code className="text-[#FFE500]">{contractDepositResult.commitment?.slice(0, 16)}...</code></p>
+                            <p>Ephemeral Key: <code className="text-white/70">{contractDepositResult.ephemeralPublicKey?.slice(0, 16)}...</code></p>
+                            <p>Amount: {contractDepositResult.amount} SOL</p>
+                            {contractDepositResult.txSignature && (
+                              <p className="flex items-center gap-2 mt-2">
+                                <span className="text-white/40">Transaction:</span>
+                                <a 
+                                  href={`https://solscan.io/tx/${contractDepositResult.txSignature}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[#FFE500] hover:text-[#FFDD00] underline flex items-center gap-1"
+                                >
+                                  View on Solscan
+                                  <ExternalLink size={12} />
+                                </a>
+                              </p>
+                            )}
+                            <p className="text-xs text-white/40 mt-2">
+                              💡 Receiver can now scan and claim with their keys
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="bg-[#111] border border-white/5 rounded-xl p-6">
+                      <div className="flex items-start gap-4">
+                        <div className="w-10 h-10 rounded-full bg-[#FFE500]/20 flex items-center justify-center flex-shrink-0">
+                          <Shield size={18} className="text-[#FFE500]" />
+                        </div>
+                        <div>
+                          <h4 className="font-medium mb-1 text-[#FFE500]">Enhanced Privacy</h4>
+                          <p className="text-white/40 text-sm">
+                            ZK commitments hide receiver address and amount from blockchain observers.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="bg-[#111] border border-white/5 rounded-xl p-6">
+                      <div className="flex items-start gap-4">
+                        <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
+                          <Lock size={18} className="text-green-400" />
+                        </div>
+                        <div>
+                          <h4 className="font-medium mb-1 text-green-400">Double-Spend Protection</h4>
+                          <p className="text-white/40 text-sm">
+                            Nullifiers prevent double-spending automatically via smart contract.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                {/* RECEIVE TAB */}
+                <TabsContent value="receive" className="space-y-6">
+                  <div className="bg-[#111] border border-white/5 rounded-xl">
+                    <div className="p-6 border-b border-white/5">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Download className="text-[#FFE500]" size={24} />
+                        <h3 className="text-xl font-bold">Scan & Claim from Pool</h3>
+                      </div>
+                      <p className="text-gray-400 text-sm">
+                        Detect and claim deposits from the privacy contract pool
+                      </p>
+                    </div>
+                    <div className="p-6 space-y-4">
+                      <Button
+                        onClick={scanForPayments}
+                        disabled={isScanningContract || !authenticated || !metaAddress}
+                        className="w-full bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                        size="lg"
+                      >
+                        {isScanningContract ? (
+                          <>
+                            <Loader2 className="mr-2 animate-spin" size={18} />
+                            Scanning Contract...
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw size={18} className="mr-2" />
+                            Scan Contract Deposits
+                          </>
+                        )}
+                      </Button>
+                      
+                      {!metaAddress && authenticated && (
+                        <div className="text-center py-4 text-white/40 text-sm">
+                          Generate a meta-address first to scan for deposits
+                        </div>
+                      )}
+                      
+                      <div className="space-y-3">
+                        {contractDeposits.length > 0 ? (
+                          contractDeposits.map((deposit, idx) => (
+                            <div key={deposit.commitment} className="bg-black/30 border border-white/5 rounded-xl p-6">
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <div className="w-8 h-8 rounded-full bg-[#FFE500]/20 flex items-center justify-center">
+                                      <Layers size={14} className="text-[#FFE500]" />
+                                    </div>
+                                    <div>
+                                      <p className="font-bold text-green-500 text-lg">{deposit.amount} SOL</p>
+                                      <p className="text-xs text-white/40">Deposit #{deposit.depositIndex}</p>
+                                    </div>
+                                  </div>
+                                  <p className="text-xs text-white/40 mb-1">
+                                    Commitment: <code className="text-white/60">{deposit.commitment.slice(0, 16)}...</code>
+                                  </p>
+                                  <p className="text-xs text-white/40">
+                                    {new Date(deposit.timestamp).toLocaleString()}
+                                  </p>
+                                </div>
+                                <Button
+                                  onClick={() => claimPayment(deposit)}
+                                  disabled={isClaimingContract === deposit.commitment || deposit.claimed}
+                                  size="sm"
+                                  className="bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                                >
+                                  {isClaimingContract === deposit.commitment ? (
+                                    <>
+                                      <Loader2 className="mr-1 animate-spin" size={14} />
+                                      Claiming...
+                                    </>
+                                  ) : deposit.claimed ? (
+                                    <>
+                                      <Check size={14} className="mr-1" />
+                                      Claimed
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Download size={14} className="mr-1" />
+                                      Claim
+                                    </>
+                                  )}
+                                </Button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-center py-8 text-white/40">
+                            {isScanningContract ? "Scanning contract..." : "No contract deposits found"}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  
+                  <div className="bg-[#111] border border-white/5 rounded-xl p-6">
+                    <div className="flex items-start gap-4">
+                      <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center flex-shrink-0">
+                        <Shield size={18} className="text-green-400" />
+                      </div>
+                      <div>
+                        <h4 className="font-medium mb-1 text-green-400">Complete Privacy</h4>
+                        <p className="text-white/40 text-sm">
+                          Claims are processed through the smart contract with nullifier verification, ensuring complete receiver anonymity.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </TabsContent>
+
+              </Tabs>
+
+              {/* Info Banner */}
+              <div className="bg-gradient-to-r from-[#FFE500]/10 to-[#FFE500]/5 border border-[#FFE500]/20 rounded-xl p-5 flex items-center gap-4">
+                <div className="w-10 h-10 rounded-full bg-[#FFE500]/20 flex items-center justify-center flex-shrink-0">
+                  <Layers size={18} className="text-[#FFE500]" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-[#FFE500] font-medium text-sm">Smart Contract Privacy Pool</p>
+                  <p className="text-white/40 text-xs">
+                    Enhanced privacy using on-chain smart contracts with ZK commitments and nullifier protection.
+                  </p>
+                </div>
+              </div>
+            </div>
+          );
+        
         case "offline":
           return (
             <div className="max-w-6xl mx-auto space-y-6">
@@ -560,6 +1636,7 @@ export default function Dashboard() {
 
         <nav className="space-y-2 flex-1">
             <SidebarItem id="dashboard" icon={Home} label="Dashboard" />
+            <SidebarItem id="stealth" icon={Shield} label="Stealth Transfers" />
             <SidebarItem id="offline" icon={WifiOff} label="Offline Cash" />
             <SidebarItem id="activity" icon={Activity} label="Activity" />
             <SidebarItem id="feedback" icon={MessageSquare} label="Feedback" />
@@ -648,6 +1725,47 @@ export default function Dashboard() {
          </div>
 
       </main>
+      
+      {/* Custom Regenerate Confirmation Dialog */}
+      {showRegenerateConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-[#111] border border-[#FFE500]/30 rounded-2xl shadow-2xl">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-12 h-12 rounded-full bg-yellow-500/20 flex items-center justify-center">
+                  <RefreshCw size={24} className="text-yellow-500" />
+                </div>
+                <h3 className="text-white text-xl font-bold">Regenerate Meta-Address?</h3>
+              </div>
+              <p className="text-white/60 text-base leading-relaxed mb-4">
+                ⚠️ This will create a new meta-address. You'll need to share the new address with anyone who wants to send you payments. Your old meta-address will no longer work.
+              </p>
+              <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mb-4">
+                <p className="text-yellow-500 text-sm font-medium mb-1">⚡ Important</p>
+                <p className="text-white/60 text-xs">
+                  Anyone with your old meta-address won't be able to send you future payments.
+                </p>
+              </div>
+              <div className="flex gap-3">
+                <Button
+                  onClick={() => setShowRegenerateConfirm(false)}
+                  variant="outline"
+                  className="flex-1 border-white/20 hover:bg-white/10 text-white"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={performGeneration}
+                  className="flex-1 bg-[#FFE500] hover:bg-[#FFDD00] text-black font-bold"
+                >
+                  <RefreshCw size={16} className="mr-2" />
+                  Continue
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
